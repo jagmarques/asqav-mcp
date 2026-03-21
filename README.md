@@ -2,6 +2,8 @@
 
 MCP server for AI agent governance. Check policies, create audit trails, and verify compliance through any MCP client.
 
+[![asqav-mcp MCP server](https://glama.ai/mcp/servers/jagmarques/asqav-mcp/badges/card.svg)](https://glama.ai/mcp/servers/jagmarques/asqav-mcp)
+
 ## Tools
 
 | Tool | Description |
