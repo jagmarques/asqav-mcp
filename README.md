@@ -7,7 +7,7 @@
   Governance for AI agents. Audit trails, policy enforcement, and compliance.
 </p>
 
-# Asqav MCP Server
+# MCP Server
 
 MCP server for AI agent governance. Check policies, create audit trails, and verify compliance through any MCP client.
 
