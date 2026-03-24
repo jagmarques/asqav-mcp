@@ -1,9 +1,6 @@
 <p align="center">
   <a href="https://asqav.com">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://asqav.com/logo-text-dark.png">
-      <img src="https://asqav.com/logo-text.png" alt="asqav" width="200">
-    </picture>
+    <img src="https://asqav.com/logo-readme.png" alt="asqav" width="200">
   </a>
 </p>
 <p align="center">
@@ -14,7 +11,9 @@
 
 MCP server for AI agent governance. Check policies, create audit trails, and verify compliance through any MCP client.
 
-[![asqav-mcp MCP server](https://glama.ai/mcp/servers/jagmarques/asqav-mcp/badges/card.svg)](https://glama.ai/mcp/servers/jagmarques/asqav-mcp)
+<p align="center">
+  <a href="https://glama.ai/mcp/servers/jagmarques/asqav-mcp"><img src="https://glama.ai/mcp/servers/jagmarques/asqav-mcp/badges/card.svg" alt="asqav-mcp MCP server"></a>
+</p>
 
 ## Tools
 
