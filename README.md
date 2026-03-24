@@ -1,3 +1,10 @@
+<p align="center">
+  <img src="https://asqav.com/logo-text.svg" alt="asqav" width="200">
+</p>
+<p align="center">
+  <em>MCP server for AI agent governance</em>
+</p>
+
 # Asqav MCP Server
 
 MCP server for AI agent governance. Check policies, create audit trails, and verify compliance through any MCP client.
