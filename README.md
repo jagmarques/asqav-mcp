@@ -2,9 +2,12 @@
   <a href="https://asqav.com">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://asqav.com/logo-text-dark.png">
-      <img src="https://asqav.com/logo-text.svg" alt="asqav" width="200">
+      <img src="https://asqav.com/logo-text.png" alt="asqav" width="200">
     </picture>
   </a>
+</p>
+<p align="center">
+  Governance for AI agents. Audit trails, policy enforcement, and compliance.
 </p>
 
 # Asqav MCP Server
