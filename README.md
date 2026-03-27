@@ -6,6 +6,17 @@
 <p align="center">
   Governance for AI agents. Audit trails, policy enforcement, and compliance.
 </p>
+<p align="center">
+  <a href="https://pypi.org/project/asqav-mcp/"><img src="https://img.shields.io/pypi/v/asqav-mcp?style=flat-square&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square&logo=opensourceinitiative&logoColor=white" alt="License: MIT"></a>
+  <a href="https://github.com/jagmarques/asqav-mcp"><img src="https://img.shields.io/github/stars/jagmarques/asqav-mcp?style=social" alt="GitHub stars"></a>
+</p>
+<p align="center">
+  <a href="https://asqav.com">Website</a> |
+  <a href="https://asqav.com/docs">Docs</a> |
+  <a href="https://asqav.com/docs/sdk">SDK Guide</a> |
+  <a href="https://asqav.com/compliance">Compliance</a>
+</p>
 
 # MCP Server
 
