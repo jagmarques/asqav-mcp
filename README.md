@@ -185,3 +185,5 @@ MIT - see [LICENSE](LICENSE) for details.
 ---
 
 If asqav-mcp helps you, consider giving it a star. It helps others find the project.
+
+<!-- mcp-name: io.github.jagmarques/asqav-mcp -->
