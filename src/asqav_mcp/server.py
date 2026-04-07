@@ -230,6 +230,14 @@ async def gate_action(
         if tool_name and tool_name in _tool_policies:
             tp = _tool_policies[tool_name]
 
+            # Hidden tools are treated as nonexistent.
+            if tp.get("hidden", False):
+                return json.dumps({
+                    "decision": "ERROR",
+                    "reason": f"Tool '{tool_name}' not found",
+                    "gate_id": gate_id,
+                })
+
             # Check rate limit.
             max_rpm = tp.get("max_calls_per_minute", 0)
             if max_rpm > 0 and not _check_rate_limit(tool_name, max_rpm):
@@ -469,6 +477,15 @@ async def enforced_tool_call(
             })
 
         # Step 2: Check local tool policy.
+        # Hidden tools are treated as nonexistent - no audit record, no denial message.
+        if policy.get("hidden", False):
+            return json.dumps({
+                "status": "ERROR",
+                "tool_name": tool_name,
+                "call_id": call_id,
+                "reason": f"Tool '{tool_name}' not found",
+            })
+
         if policy.get("blocked", False):
             await _request("POST", "/sign", json_body={
                 "agent_id": agent_id,
@@ -669,6 +686,7 @@ async def create_tool_policy(
     require_approval: bool = False,
     max_calls_per_minute: int = 0,
     blocked: bool = False,
+    hidden: bool = False,
     tool_endpoint: str | None = None,
 ) -> str:
     """Create or update a local enforcement policy for a tool.
@@ -686,6 +704,7 @@ async def create_tool_policy(
         require_approval: If true, high-risk tools need human approval before execution
         max_calls_per_minute: Rate limit (0 = unlimited)
         blocked: If true, the tool is completely blocked
+        hidden: If true, the tool is invisible - not listed and treated as nonexistent
         tool_endpoint: Optional HTTP endpoint to forward approved calls to
     """
     if risk_level not in ("low", "medium", "high"):
@@ -696,10 +715,16 @@ async def create_tool_policy(
         "require_approval": require_approval,
         "max_calls_per_minute": max_calls_per_minute,
         "blocked": blocked,
+        "hidden": hidden,
         "tool_endpoint": tool_endpoint,
     }
 
-    status = "blocked" if blocked else f"{risk_level} risk"
+    if hidden:
+        status = "hidden"
+    elif blocked:
+        status = "blocked"
+    else:
+        status = f"{risk_level} risk"
     if require_approval:
         status += ", requires approval"
     if max_calls_per_minute > 0:
@@ -719,7 +744,9 @@ async def list_tool_policies() -> str:
     lines = []
     for name, policy in sorted(_tool_policies.items()):
         parts = [policy.get("risk_level", "unknown")]
-        if policy.get("blocked"):
+        if policy.get("hidden"):
+            parts = ["HIDDEN"]
+        elif policy.get("blocked"):
             parts = ["BLOCKED"]
         if policy.get("require_approval"):
             parts.append("approval required")

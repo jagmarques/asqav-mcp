@@ -200,7 +200,8 @@ Options per tool:
 - `risk_level` - "low", "medium", or "high"
 - `require_approval` - high-risk tools require human approval before execution
 - `max_calls_per_minute` - rate limit (0 = unlimited)
-- `blocked` - completely block a tool
+- `blocked` - completely block a tool (returns a denial with reason)
+- `hidden` - make a tool invisible; it will not appear in listings and any call to it returns "not found", as if the tool does not exist in policy at all. Stronger than blocked.
 - `tool_endpoint` - HTTP endpoint to forward approved calls to (enables automatic bilateral receipts)
 
 ### Example: enforced tool call with bilateral receipt
