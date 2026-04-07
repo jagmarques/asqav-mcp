@@ -61,13 +61,25 @@ Your MCP client now has access to policy enforcement, audit signing, and agent m
 
 ## Tools
 
+### Governance
+
 | Tool | What it does |
 |------|-------------|
 | `check_policy` | Check if an action is allowed by your organization's policies |
 | `sign_action` | Create a quantum-safe signed audit record for an agent action |
+| `verify_signature` | Verify a previously created signature |
 | `list_agents` | List all registered AI agents |
 | `get_agent` | Get details for a specific agent |
-| `verify_signature` | Verify a previously created signature |
+
+### Enforcement
+
+| Tool | What it does |
+|------|-------------|
+| `gate_action` | Pre-execution enforcement gate. Checks policy, signs the decision, returns verdict. Bounded enforcement - the audit trail proves the check happened. |
+| `enforced_tool_call` | Strong enforcement proxy. Checks policy, rate limits, and approval requirements before allowing a tool call. Fail-closed - if the check fails, the action is denied. |
+| `create_tool_policy` | Create or update a local enforcement policy for a tool (risk level, rate limits, approval, blocking) |
+| `list_tool_policies` | List all active tool enforcement policies |
+| `delete_tool_policy` | Remove a tool enforcement policy |
 
 ## Setup
 
@@ -139,18 +151,50 @@ docker run -e ASQAV_API_KEY="sk_live_..." asqav-mcp
 | Manual compliance reports | Automated EU AI Act and DORA reports |
 | Breaks when quantum computers arrive | Quantum-safe from day one |
 
-## Example: policy check in Claude
+## Enforcement
 
-Once connected, Claude can check policies before acting:
+asqav-mcp provides three tiers of enforcement:
 
-> "Check if the action data:delete:users is allowed"
+**Strong** - `enforced_tool_call` acts as a non-bypassable proxy. The agent calls tools through the MCP server, which checks policy before allowing execution. The agent never has direct tool access.
 
-The MCP server will evaluate your organization's policies and return whether the action is allowed, blocked, or triggers an alert - before the agent proceeds.
+**Bounded** - `gate_action` is a pre-execution gate. The agent calls it before any irreversible action. The audit trail proves whether the check happened, creating accountability even if the agent could theoretically skip the call.
+
+**Detectable** - `sign_action` records what happened with cryptographic proof. If logs are tampered with or entries omitted, the hash chain breaks and verification fails.
+
+### Tool policies
+
+Control enforcement per tool using `create_tool_policy` or the `ASQAV_PROXY_TOOLS` env var:
+
+```bash
+export ASQAV_PROXY_TOOLS='{"sql:execute": {"risk_level": "high", "require_approval": true, "max_calls_per_minute": 5}, "file:delete": {"blocked": true}}'
+```
+
+Options per tool:
+- `risk_level` - "low", "medium", or "high"
+- `require_approval` - high-risk tools require human approval before execution
+- `max_calls_per_minute` - rate limit (0 = unlimited)
+- `blocked` - completely block a tool
+
+### Example: enforced tool call
+
+```
+Agent: "Execute SQL query DROP TABLE users"
+
+1. Agent calls enforced_tool_call(tool_name="sql:execute", agent_id="agent-1", arguments='{"query": "DROP TABLE users"}')
+2. MCP server checks policy - sql:execute is high-risk, requires approval
+3. Returns PENDING_APPROVAL with approval_id
+4. Human approves or denies in the dashboard
+5. Every step is signed into the tamper-evident audit trail
+```
 
 ## Features
 
+- **Strong enforcement** - tool proxy that checks policy before allowing execution
+- **Bounded enforcement** - pre-execution gates with signed audit proof
 - **Policy enforcement** - check actions against your org's rules before execution
 - **Quantum-safe signatures** - ML-DSA-65 with RFC 3161 timestamps on every action
+- **Tool policies** - per-tool risk levels, rate limits, approval requirements, blocking
+- **Fail-closed** - if enforcement checks fail, actions are denied by default
 - **Agent management** - list, inspect, and monitor registered agents
 - **Signature verification** - verify any audit record's authenticity
 - **Zero dependencies** - no native crypto libraries needed, all server-side
