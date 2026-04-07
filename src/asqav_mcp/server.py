@@ -22,6 +22,10 @@ _tool_policies: dict[str, dict[str, Any]] = {}
 # Rate tracking for per-tool rate limits.
 _rate_tracker: dict[str, list[float]] = {}
 
+# Pending gate approvals waiting for completion via complete_action.
+# Maps gate_id -> {"signature_id": str, "payload": dict}
+_pending_gates: dict[str, dict[str, Any]] = {}
+
 
 def _load_tool_policies():
     """Load tool policies from ASQAV_PROXY_TOOLS env var."""
@@ -204,8 +208,9 @@ async def gate_action(
     Both approvals and denials are recorded in the audit trail so there is
     cryptographic proof that the check happened.
 
-    This provides bounded enforcement - the agent is expected to call this
-    before acting, and the audit trail proves whether it did.
+    After the agent completes an approved action, call complete_action(gate_id, result)
+    to create a bilateral receipt that binds the approval and the outcome together.
+    This closes the audit gap where an auditor could prove approval but not outcome.
 
     Args:
         action_type: The action to gate (e.g. "data:delete:users", "tool:execute:sql")
@@ -241,20 +246,25 @@ async def gate_action(
                 decision = "DENIED"
                 policy_result = f"BLOCKED: Tool '{tool_name}' is blocked by local policy"
 
-        # Sign the decision into the audit trail.
+        # Build the approval payload to sign.
+        parsed_arguments: Any = None
+        if arguments:
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = {"raw": arguments}
+
         sign_payload = {
             "gate_id": gate_id,
             "decision": decision,
             "action_type": action_type,
             "tool_name": tool_name,
+            "arguments": parsed_arguments,
             "policy_result": policy_result,
             "risk_context": risk_context,
+            "timestamp": time.time(),
+            "receipt_type": "approval",
         }
-        if arguments:
-            try:
-                sign_payload["arguments"] = json.loads(arguments)
-            except json.JSONDecodeError:
-                sign_payload["arguments_raw"] = arguments
 
         sign_result = await _request("POST", "/sign", json_body={
             "agent_id": agent_id,
@@ -296,10 +306,22 @@ async def gate_action(
                     "message": "Action requires human approval. Check the dashboard.",
                 })
         else:
+            # Store gate context so complete_action can reference it.
+            _pending_gates[gate_id] = {
+                "agent_id": agent_id,
+                "approval_signature_id": sig_id,
+                "action_type": action_type,
+                "tool_name": tool_name,
+                "arguments": parsed_arguments,
+            }
             return json.dumps({
                 "decision": "APPROVED",
                 "gate_id": gate_id,
                 "signature_id": sig_id,
+                "message": (
+                    "Action approved. After completing the action, call "
+                    "complete_action(gate_id, result) to close the bilateral receipt."
+                ),
             })
 
     except Exception as e:
@@ -312,17 +334,95 @@ async def gate_action(
 
 
 @mcp.tool()
+async def complete_action(gate_id: str, result: str) -> str:
+    """Report the outcome of a gate-approved action and close the bilateral receipt.
+
+    Call this after completing an action that was approved by gate_action. It signs
+    the outcome and binds it to the original approval, creating a bilateral receipt:
+    cryptographic proof of both what was approved and what actually happened.
+
+    Without this call, an auditor can prove the action was approved but cannot prove
+    what the result was. The bilateral receipt closes that gap.
+
+    Args:
+        gate_id: The gate_id returned by gate_action when it approved the action
+        result: A description or JSON string of the action's outcome
+    """
+    if gate_id not in _pending_gates:
+        return json.dumps({
+            "status": "ERROR",
+            "reason": f"No pending gate found for gate_id '{gate_id}'. "
+                      "Either it was already completed, denied, or the server restarted.",
+        })
+
+    gate = _pending_gates.pop(gate_id)
+    receipt_id = str(uuid.uuid4())
+
+    try:
+        parsed_result: Any
+        try:
+            parsed_result = json.loads(result)
+        except json.JSONDecodeError:
+            parsed_result = {"raw": result}
+
+        receipt_payload = {
+            "receipt_id": receipt_id,
+            "gate_id": gate_id,
+            "receipt_type": "bilateral",
+            "approval_signature_id": gate["approval_signature_id"],
+            "action_type": gate["action_type"],
+            "tool_name": gate.get("tool_name"),
+            "arguments": gate.get("arguments"),
+            "result": parsed_result,
+            "completed_at": time.time(),
+        }
+
+        sign_result = await _request("POST", "/sign", json_body={
+            "agent_id": gate["agent_id"],
+            "action_type": f"receipt:{gate['action_type']}",
+            "action_id": receipt_id,
+            "payload": receipt_payload,
+        })
+        receipt_sig_id = sign_result.get("signature_id", "unknown")
+
+        return json.dumps({
+            "status": "RECEIPT_CREATED",
+            "receipt_id": receipt_id,
+            "gate_id": gate_id,
+            "approval_signature_id": gate["approval_signature_id"],
+            "receipt_signature_id": receipt_sig_id,
+            "message": (
+                "Bilateral receipt created. Both the approval and the outcome are "
+                "signed and linked. Verify either signature to confirm the full chain."
+            ),
+        })
+
+    except Exception as e:
+        return json.dumps({
+            "status": "ERROR",
+            "gate_id": gate_id,
+            "reason": str(e),
+            "message": "Failed to create bilateral receipt.",
+        })
+
+
+@mcp.tool()
 async def enforced_tool_call(
     tool_name: str,
     agent_id: str,
     arguments: str | None = None,
+    tool_endpoint: str | None = None,
 ) -> str:
     """Execute a tool call with policy enforcement. This is the strong enforcement path.
 
-    The MCP server acts as a non-bypassable proxy: it checks policy, signs the
-    decision, and only returns an approval token if the action is allowed. The
-    agent cannot skip this check because it has no direct access to the
-    downstream tool - all access goes through this proxy.
+    The MCP server acts as a non-bypassable proxy: it checks policy, and if approved,
+    optionally forwards the call to a downstream tool endpoint and signs BOTH the
+    request and the response as a single bilateral receipt.
+
+    If tool_endpoint is provided, the call is forwarded and the response is captured
+    and signed together with the approval - proving both what was approved and what
+    the tool returned. If no tool_endpoint is configured, the approval token is
+    returned and the agent can call the tool directly (bounded enforcement).
 
     Use this instead of calling tools directly when you need enforced governance.
 
@@ -330,6 +430,7 @@ async def enforced_tool_call(
         tool_name: Name of the tool to execute
         agent_id: The agent requesting the tool call
         arguments: Optional JSON string of tool arguments
+        tool_endpoint: Optional HTTP endpoint to forward the approved call to
     """
     call_id = str(uuid.uuid4())
 
@@ -338,10 +439,16 @@ async def enforced_tool_call(
         risk_level = policy.get("risk_level", "low")
         action_type = f"tool:execute:{tool_name}"
 
+        parsed_arguments: Any = None
+        if arguments:
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = {"raw": arguments}
+
         # Step 1: Check organization policies via API.
         policy_result = await check_policy(action_type, agent_id)
         if policy_result.startswith("BLOCKED"):
-            # Sign the denial.
             await _request("POST", "/sign", json_body={
                 "agent_id": agent_id,
                 "action_type": f"enforce:denied:{tool_name}",
@@ -350,6 +457,8 @@ async def enforced_tool_call(
                     "tool_name": tool_name,
                     "reason": policy_result,
                     "risk_level": risk_level,
+                    "receipt_type": "denial",
+                    "timestamp": time.time(),
                 },
             })
             return json.dumps({
@@ -365,7 +474,12 @@ async def enforced_tool_call(
                 "agent_id": agent_id,
                 "action_type": f"enforce:denied:{tool_name}",
                 "action_id": call_id,
-                "payload": {"tool_name": tool_name, "reason": "blocked by local policy"},
+                "payload": {
+                    "tool_name": tool_name,
+                    "reason": "blocked by local policy",
+                    "receipt_type": "denial",
+                    "timestamp": time.time(),
+                },
             })
             return json.dumps({
                 "status": "DENIED",
@@ -381,7 +495,12 @@ async def enforced_tool_call(
                 "agent_id": agent_id,
                 "action_type": f"enforce:rate_limited:{tool_name}",
                 "action_id": call_id,
-                "payload": {"tool_name": tool_name, "max_per_minute": max_rpm},
+                "payload": {
+                    "tool_name": tool_name,
+                    "max_per_minute": max_rpm,
+                    "receipt_type": "denial",
+                    "timestamp": time.time(),
+                },
             })
             return json.dumps({
                 "status": "DENIED",
@@ -405,6 +524,8 @@ async def enforced_tool_call(
                     "payload": {
                         "tool_name": tool_name,
                         "approval_id": approval.get("action_id"),
+                        "receipt_type": "pending",
+                        "timestamp": time.time(),
                     },
                 })
                 return json.dumps({
@@ -422,25 +543,113 @@ async def enforced_tool_call(
                     "message": "Human approval required. Check the dashboard.",
                 })
 
-        # Step 5: Allowed - sign the approval and return execution token.
-        sign_result = await _request("POST", "/sign", json_body={
-            "agent_id": agent_id,
-            "action_type": f"enforce:approved:{tool_name}",
-            "action_id": call_id,
-            "payload": {
-                "tool_name": tool_name,
-                "arguments": json.loads(arguments) if arguments else None,
-                "risk_level": risk_level,
-            },
-        })
+        # Step 5: Approved. Optionally forward to the downstream tool endpoint.
+        effective_endpoint = tool_endpoint or policy.get("tool_endpoint")
 
-        return json.dumps({
-            "status": "APPROVED",
-            "tool_name": tool_name,
-            "call_id": call_id,
-            "signature_id": sign_result.get("signature_id", "unknown"),
-            "message": f"Tool '{tool_name}' execution approved and signed.",
-        })
+        if effective_endpoint:
+            # Forward the call and capture the response for the bilateral receipt.
+            tool_response: Any = None
+            forward_error: str | None = None
+            try:
+                async with httpx.AsyncClient() as client:
+                    fwd = await client.post(
+                        effective_endpoint,
+                        json={"tool_name": tool_name, "arguments": parsed_arguments},
+                        timeout=60.0,
+                    )
+                    fwd.raise_for_status()
+                    tool_response = fwd.json()
+            except Exception as fwd_exc:
+                forward_error = str(fwd_exc)
+
+            # Sign request + response together as one bilateral receipt.
+            receipt_payload: dict[str, Any] = {
+                "call_id": call_id,
+                "receipt_type": "bilateral",
+                "tool_name": tool_name,
+                "arguments": parsed_arguments,
+                "risk_level": risk_level,
+                "decision": "APPROVED",
+                "timestamp": time.time(),
+            }
+            if tool_response is not None:
+                receipt_payload["response"] = tool_response
+            if forward_error is not None:
+                receipt_payload["forward_error"] = forward_error
+
+            sign_result = await _request("POST", "/sign", json_body={
+                "agent_id": agent_id,
+                "action_type": f"enforce:bilateral:{tool_name}",
+                "action_id": call_id,
+                "payload": receipt_payload,
+            })
+            sig_id = sign_result.get("signature_id", "unknown")
+
+            if forward_error:
+                return json.dumps({
+                    "status": "APPROVED_FORWARD_FAILED",
+                    "tool_name": tool_name,
+                    "call_id": call_id,
+                    "signature_id": sig_id,
+                    "forward_error": forward_error,
+                    "message": (
+                        "Approval signed but forwarding to tool endpoint failed. "
+                        "The bilateral receipt records both the approval and the error."
+                    ),
+                })
+
+            return json.dumps({
+                "status": "EXECUTED",
+                "tool_name": tool_name,
+                "call_id": call_id,
+                "signature_id": sig_id,
+                "response": tool_response,
+                "message": (
+                    f"Tool '{tool_name}' executed. Bilateral receipt signed - "
+                    "both request and response are cryptographically bound."
+                ),
+            })
+
+        else:
+            # No endpoint configured - sign approval only and return token.
+            # The agent can use complete_action after calling the tool directly
+            # to close the bilateral receipt.
+            sign_result = await _request("POST", "/sign", json_body={
+                "agent_id": agent_id,
+                "action_type": f"enforce:approved:{tool_name}",
+                "action_id": call_id,
+                "payload": {
+                    "call_id": call_id,
+                    "receipt_type": "approval",
+                    "tool_name": tool_name,
+                    "arguments": parsed_arguments,
+                    "risk_level": risk_level,
+                    "decision": "APPROVED",
+                    "timestamp": time.time(),
+                },
+            })
+            sig_id = sign_result.get("signature_id", "unknown")
+
+            # Register as a pending gate so complete_action can close the receipt.
+            _pending_gates[call_id] = {
+                "agent_id": agent_id,
+                "approval_signature_id": sig_id,
+                "action_type": action_type,
+                "tool_name": tool_name,
+                "arguments": parsed_arguments,
+            }
+
+            return json.dumps({
+                "status": "APPROVED",
+                "tool_name": tool_name,
+                "call_id": call_id,
+                "signature_id": sig_id,
+                "message": (
+                    f"Tool '{tool_name}' execution approved and signed. "
+                    "After executing the tool, call complete_action(call_id, result) "
+                    "to create a bilateral receipt linking approval to outcome."
+                ),
+            })
 
     except Exception as e:
         # Fail-closed: if enforcement check fails, deny the action.
@@ -460,6 +669,7 @@ async def create_tool_policy(
     require_approval: bool = False,
     max_calls_per_minute: int = 0,
     blocked: bool = False,
+    tool_endpoint: str | None = None,
 ) -> str:
     """Create or update a local enforcement policy for a tool.
 
@@ -467,12 +677,16 @@ async def create_tool_policy(
     specific tools. Policies are checked locally (no API round-trip) for
     fast enforcement decisions.
 
+    Set tool_endpoint to enable automatic forwarding in enforced_tool_call,
+    which produces a bilateral receipt binding the request and the tool's response.
+
     Args:
         tool_name: Name of the tool to create a policy for
         risk_level: Risk classification - "low", "medium", or "high"
         require_approval: If true, high-risk tools need human approval before execution
         max_calls_per_minute: Rate limit (0 = unlimited)
         blocked: If true, the tool is completely blocked
+        tool_endpoint: Optional HTTP endpoint to forward approved calls to
     """
     if risk_level not in ("low", "medium", "high"):
         return f"Error: risk_level must be 'low', 'medium', or 'high', got '{risk_level}'"
@@ -482,6 +696,7 @@ async def create_tool_policy(
         "require_approval": require_approval,
         "max_calls_per_minute": max_calls_per_minute,
         "blocked": blocked,
+        "tool_endpoint": tool_endpoint,
     }
 
     status = "blocked" if blocked else f"{risk_level} risk"
@@ -489,6 +704,8 @@ async def create_tool_policy(
         status += ", requires approval"
     if max_calls_per_minute > 0:
         status += f", max {max_calls_per_minute}/min"
+    if tool_endpoint:
+        status += f", endpoint: {tool_endpoint}"
 
     return f"Policy created for '{tool_name}': {status}"
 
@@ -508,6 +725,8 @@ async def list_tool_policies() -> str:
             parts.append("approval required")
         if policy.get("max_calls_per_minute", 0) > 0:
             parts.append(f"max {policy['max_calls_per_minute']}/min")
+        if policy.get("tool_endpoint"):
+            parts.append(f"endpoint: {policy['tool_endpoint']}")
         lines.append(f"- {name}: {', '.join(parts)}")
 
     return "\n".join(lines)

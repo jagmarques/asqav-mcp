@@ -77,9 +77,10 @@ Your MCP client now has access to policy enforcement, audit signing, and agent m
 
 | Tool | What it does |
 |------|-------------|
-| `gate_action` | Pre-execution enforcement gate. Checks policy, signs the decision, returns verdict. Bounded enforcement - the audit trail proves the check happened. |
-| `enforced_tool_call` | Strong enforcement proxy. Checks policy, rate limits, and approval requirements before allowing a tool call. Fail-closed - if the check fails, the action is denied. |
-| `create_tool_policy` | Create or update a local enforcement policy for a tool (risk level, rate limits, approval, blocking) |
+| `gate_action` | Pre-execution enforcement gate. Checks policy, signs the approval or denial, returns verdict. Call `complete_action` after the action to close the bilateral receipt. |
+| `complete_action` | Report the outcome of a gate-approved action. Signs the result and binds it to the original approval, creating a bilateral receipt. |
+| `enforced_tool_call` | Strong enforcement proxy. Checks policy, rate limits, and approval requirements. If a `tool_endpoint` is configured, forwards the call and signs request + response together as a bilateral receipt. |
+| `create_tool_policy` | Create or update a local enforcement policy for a tool (risk level, rate limits, approval, blocking, tool endpoint) |
 | `list_tool_policies` | List all active tool enforcement policies |
 | `delete_tool_policy` | Remove a tool enforcement policy |
 
@@ -157,11 +158,35 @@ docker run -e ASQAV_API_KEY="sk_live_..." asqav-mcp
 
 asqav-mcp provides three tiers of enforcement:
 
-**Strong** - `enforced_tool_call` acts as a non-bypassable proxy. The agent calls tools through the MCP server, which checks policy before allowing execution. The agent never has direct tool access.
+**Strong** - `enforced_tool_call` acts as a non-bypassable proxy. The agent calls tools through the MCP server, which checks policy before allowing execution. If a `tool_endpoint` is configured, the call is forwarded and the response captured - producing a bilateral receipt that signs request and response together.
 
-**Bounded** - `gate_action` is a pre-execution gate. The agent calls it before any irreversible action. The audit trail proves whether the check happened, creating accountability even if the agent could theoretically skip the call.
+**Bounded** - `gate_action` is a pre-execution gate. The agent calls it before any irreversible action. After completing the action, the agent calls `complete_action` to close the bilateral receipt. The audit trail proves both that the check happened and what the outcome was.
 
 **Detectable** - `sign_action` records what happened with cryptographic proof. If logs are tampered with or entries omitted, the hash chain breaks and verification fails.
+
+### Bilateral receipts
+
+A standard approval signature proves the action was authorized but not what happened after. Bilateral receipts fix this by cryptographically binding the approval and the outcome into a single signed record.
+
+Two ways to create them:
+
+**Via gate_action + complete_action** (bounded enforcement):
+
+```
+1. Agent calls gate_action(action_type, agent_id, ...) -> returns gate_id + approval signature
+2. Agent performs the action
+3. Agent calls complete_action(gate_id, result) -> signs outcome, links it to approval
+4. Auditor can verify either signature and trace the full chain
+```
+
+**Via enforced_tool_call with tool_endpoint** (strong enforcement):
+
+```
+1. Agent calls enforced_tool_call(tool_name, agent_id, arguments, tool_endpoint=...)
+2. Server checks policy, forwards the call to tool_endpoint, captures the response
+3. Server signs request + response together as one bilateral receipt
+4. Agent never touches the tool directly - the server owns the full chain
+```
 
 ### Tool policies
 
@@ -176,17 +201,19 @@ Options per tool:
 - `require_approval` - high-risk tools require human approval before execution
 - `max_calls_per_minute` - rate limit (0 = unlimited)
 - `blocked` - completely block a tool
+- `tool_endpoint` - HTTP endpoint to forward approved calls to (enables automatic bilateral receipts)
 
-### Example: enforced tool call
+### Example: enforced tool call with bilateral receipt
 
 ```
 Agent: "Execute SQL query DROP TABLE users"
 
-1. Agent calls enforced_tool_call(tool_name="sql:execute", agent_id="agent-1", arguments='{"query": "DROP TABLE users"}')
+1. Agent calls enforced_tool_call(tool_name="sql:execute", agent_id="agent-1", arguments='{"query": "DROP TABLE users"}', tool_endpoint="http://sql-service/execute")
 2. MCP server checks policy - sql:execute is high-risk, requires approval
 3. Returns PENDING_APPROVAL with approval_id
-4. Human approves or denies in the dashboard
-5. Every step is signed into the tamper-evident audit trail
+4. Human approves in the dashboard
+5. On the next call (post-approval), server forwards to sql-service and signs request + response as bilateral receipt
+6. Auditor can prove both the approval decision and the exact query result
 ```
 
 ## Features
