@@ -33,12 +33,14 @@ AI agents act autonomously - calling APIs, reading data, making decisions. Witho
 
 asqav-mcp exposes governance tools through the [Model Context Protocol](https://modelcontextprotocol.io/), so any MCP-compatible AI client can:
 
+- **Enforce tool policies** with three-tier enforcement (strong, bounded, detectable)
+- **Gate actions** before execution with signed approval/denial decisions
 - **Check policies** before taking an action
 - **Sign actions** with quantum-safe cryptography (ML-DSA, FIPS 204)
 - **Verify audit trails** for any previous action
 - **List and inspect agents** registered in your organization
 
-All cryptography runs server-side. Zero native dependencies. Just `pip install` and connect.
+All features are available on the free tier. All cryptography runs server-side. Zero native dependencies. Just `pip install` and connect.
 
 ## Quick start
 
