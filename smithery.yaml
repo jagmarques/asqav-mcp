@@ -1,0 +1,22 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      ASQAV_API_KEY:
+        type: string
+        description: "Asqav API key (get one free at asqav.com)"
+      ASQAV_API_URL:
+        type: string
+        default: "https://api.asqav.com"
+        description: "Asqav API URL"
+    required:
+      - ASQAV_API_KEY
+  commandFunction: |-
+    (config) => ({
+      command: "asqav-mcp",
+      env: {
+        ASQAV_API_KEY: config.ASQAV_API_KEY,
+        ASQAV_API_URL: config.ASQAV_API_URL || "https://api.asqav.com"
+      }
+    })
