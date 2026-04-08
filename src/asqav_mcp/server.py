@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 import uuid
 from typing import Any
@@ -770,6 +771,167 @@ async def delete_tool_policy(tool_name: str) -> str:
         del _tool_policies[tool_name]
         return f"Policy removed for '{tool_name}'"
     return f"No policy found for '{tool_name}'"
+
+
+# ---------------------------------------------------------------------------
+# Tool definition scanner
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate prompt injection attempts in descriptions.
+_INJECTION_PATTERNS = [
+    re.compile(r"\bignore\s+(all\s+)?(previous|prior|above)\b", re.I),
+    re.compile(r"\byou\s+(must|should|will|shall)\b", re.I),
+    re.compile(r"\bdo\s+not\s+(follow|obey|use)\b", re.I),
+    re.compile(r"\bsystem\s*prompt\b", re.I),
+    re.compile(r"\bact\s+as\b", re.I),
+    re.compile(r"\bnew\s+instructions?\b", re.I),
+    re.compile(r"\boverride\b", re.I),
+    re.compile(r"\bdisregard\b", re.I),
+    re.compile(r"\bpretend\b", re.I),
+    re.compile(r"\bfrom\s+now\s+on\b", re.I),
+]
+
+# Field names in input_schema that are commonly abused for code execution.
+_DANGEROUS_SCHEMA_FIELDS = {"exec", "eval", "command", "shell", "system", "cmd", "subprocess", "spawn"}
+
+# Patterns for hardcoded secrets.
+_SECRET_PATTERNS = [
+    re.compile(r"\b(sk|pk|api|secret|token|password|passwd|pwd|key)[-_]?[a-z0-9]{16,}\b", re.I),
+    re.compile(r"(?<![a-z])(AKIA|ASIA|ABIA)[A-Z0-9]{16}", re.I),  # AWS key prefix
+    re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),   # GitHub token
+    re.compile(r"\bxox[bpoa]-[0-9A-Za-z\-]{10,}"),  # Slack token
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9\-._~+/]{20,}"),
+]
+
+# Common tool names and their misspelling variants to flag typosquatting.
+_TYPOSQUAT_PAIRS = [
+    ("bash", {"bsh", "bahs", "bas", "b4sh"}),
+    ("python", {"pythn", "pyhon", "pyton", "pythoon"}),
+    ("execute", {"excute", "exeucte", "executee", "exectue"}),
+    ("read_file", {"raed_file", "read_fiel", "readfile"}),
+    ("write_file", {"wrtie_file", "write_fiel", "writefile"}),
+    ("delete", {"delet", "deletee", "dleete"}),
+    ("search", {"serach", "seach", "saerch"}),
+    ("request", {"requets", "reqeust", "rquest"}),
+]
+
+
+def _scan_tool_definition_impl(
+    tool_name: str, description: str, input_schema: dict | None
+) -> dict[str, Any]:
+    """Core scanner logic. Returns a dict with risk, level, and findings."""
+    findings: list[str] = []
+    level = "CLEAN"
+
+    # 1. Prompt injection in description.
+    for pat in _INJECTION_PATTERNS:
+        if pat.search(description):
+            findings.append(f"prompt injection pattern in description: '{pat.pattern}'")
+            level = "DANGEROUS"
+
+    # 2. Hidden unicode / zero-width characters in name or description.
+    zero_width = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]")
+    if zero_width.search(tool_name):
+        findings.append("zero-width or hidden unicode characters in tool name")
+        level = "DANGEROUS"
+    if zero_width.search(description):
+        findings.append("zero-width or hidden unicode characters in description")
+        if level != "DANGEROUS":
+            level = "WARNING"
+
+    # 3. Suspicious schema field names.
+    if input_schema:
+        properties = input_schema.get("properties", {})
+        for field in properties:
+            if field.lower() in _DANGEROUS_SCHEMA_FIELDS:
+                findings.append(f"suspicious schema field: '{field}'")
+                if level == "CLEAN":
+                    level = "WARNING"
+
+    # 4. Typosquatting detection.
+    name_lower = tool_name.lower().replace("-", "_")
+    for canonical, variants in _TYPOSQUAT_PAIRS:
+        if name_lower in variants:
+            findings.append(f"possible typosquat of '{canonical}'")
+            if level == "CLEAN":
+                level = "WARNING"
+
+    # 5. Hardcoded secrets in description.
+    for pat in _SECRET_PATTERNS:
+        match = pat.search(description)
+        if match:
+            findings.append(f"possible hardcoded secret in description (matched: '{match.group()[:12]}...')")
+            level = "DANGEROUS"
+
+    return {"risk": level, "findings": findings, "tool_name": tool_name}
+
+
+@mcp.tool()
+async def scan_tool_definition(
+    tool_name: str,
+    description: str,
+    input_schema: str | None = None,
+) -> str:
+    """Scan an MCP tool definition for security threats.
+
+    Checks for prompt injection, hidden unicode, dangerous schema fields,
+    typosquatting, and hardcoded secrets. Returns a risk assessment.
+
+    Args:
+        tool_name: The tool name to scan
+        description: The tool description to scan
+        input_schema: Optional JSON string of the tool's input schema
+    """
+    schema: dict | None = None
+    if input_schema:
+        try:
+            schema = json.loads(input_schema)
+        except json.JSONDecodeError:
+            return json.dumps({"risk": "ERROR", "reason": "input_schema is not valid JSON"})
+
+    result = _scan_tool_definition_impl(tool_name, description, schema)
+
+    if result["findings"]:
+        result["details"] = result.pop("findings")
+    else:
+        result.pop("findings")
+        result["details"] = []
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def scan_all_tools() -> str:
+    """Scan all currently registered tool policies for security threats.
+
+    Checks tool names for typosquatting and hidden unicode. Returns a
+    summary with per-tool risk assessments.
+    """
+    if not _tool_policies:
+        return "No tool policies registered. Use create_tool_policy to add tools first."
+
+    results = []
+    for name in sorted(_tool_policies.keys()):
+        # Use the tool name as the description proxy since policies don't store descriptions.
+        result = _scan_tool_definition_impl(name, name, None)
+        results.append({
+            "tool_name": name,
+            "risk": result["risk"],
+            "findings": result["findings"],
+        })
+
+    dangerous = [r for r in results if r["risk"] == "DANGEROUS"]
+    warnings = [r for r in results if r["risk"] == "WARNING"]
+    clean = [r for r in results if r["risk"] == "CLEAN"]
+
+    summary = {
+        "scanned": len(results),
+        "dangerous": len(dangerous),
+        "warnings": len(warnings),
+        "clean": len(clean),
+        "results": results,
+    }
+    return json.dumps(summary, indent=2)
 
 
 def main():
