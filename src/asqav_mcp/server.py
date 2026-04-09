@@ -1,5 +1,6 @@
 """Asqav MCP Server - AI agent governance tools for MCP clients."""
 
+import hashlib
 import json
 import os
 import re
@@ -67,6 +68,11 @@ def _check_rate_limit(tool_name: str, max_per_minute: int) -> bool:
 
     _rate_tracker[tool_name].append(now)
     return True
+
+
+def _hash_value(value: str) -> str:
+    """Hash a string value with SHA-256 for output verification."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +194,49 @@ async def verify_signature(signature_id: str) -> str:
         return f"{status}: Signature {signature_id}"
     except Exception as e:
         return f"Error verifying signature: {e}"
+
+
+@mcp.tool()
+async def verify_output(signature_id: str, expected_output: str) -> str:
+    """Verify that a signed output matches the expected content.
+
+    Checks the signature validity and compares the output hash stored in the
+    signed payload against a fresh hash of expected_output. Use this to confirm
+    that an agent's reported result has not been modified after signing.
+
+    Args:
+        signature_id: The signature ID (from complete_action or sign_action)
+        expected_output: The output string to verify against the signed hash
+    """
+    try:
+        result = await _request("GET", f"/verify/{signature_id}")
+        signature_valid = result.get("valid", False)
+
+        # Extract the output_hash from the signed payload.
+        output_matches = False
+        payload = result.get("payload", {})
+        stored_hash = ""
+        if isinstance(payload, dict):
+            stored_hash = payload.get("output_hash", "")
+        if stored_hash:
+            expected_hash = _hash_value(expected_output)
+            output_matches = stored_hash == expected_hash
+
+        verified = signature_valid and output_matches
+
+        return json.dumps({
+            "verified": verified,
+            "signature_valid": signature_valid,
+            "output_matches": output_matches,
+            "signature_id": signature_id,
+        })
+    except Exception as e:
+        return json.dumps({
+            "verified": False,
+            "signature_valid": False,
+            "output_matches": False,
+            "error": str(e),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +423,9 @@ async def complete_action(gate_id: str, result: str) -> str:
         except json.JSONDecodeError:
             parsed_result = {"raw": result}
 
+        # Hash the raw result string for output verification.
+        output_hash = _hash_value(result)
+
         receipt_payload = {
             "receipt_id": receipt_id,
             "gate_id": gate_id,
@@ -383,6 +435,7 @@ async def complete_action(gate_id: str, result: str) -> str:
             "tool_name": gate.get("tool_name"),
             "arguments": gate.get("arguments"),
             "result": parsed_result,
+            "output_hash": output_hash,
             "completed_at": time.time(),
         }
 
@@ -400,9 +453,11 @@ async def complete_action(gate_id: str, result: str) -> str:
             "gate_id": gate_id,
             "approval_signature_id": gate["approval_signature_id"],
             "receipt_signature_id": receipt_sig_id,
+            "output_hash": output_hash,
             "message": (
                 "Bilateral receipt created. Both the approval and the outcome are "
-                "signed and linked. Verify either signature to confirm the full chain."
+                "signed and linked. The output_hash can be used with verify_output "
+                "to confirm the result has not been modified."
             ),
         })
 
