@@ -7,12 +7,12 @@
     "url": "https://github.com/jagmarques/asqav-mcp",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.3.3",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "asqav-mcp",
-      "version": "0.1.0",
+      "version": "0.3.3",
       "transport": {
         "type": "stdio"
       }
