@@ -8,6 +8,7 @@
 </p>
 <p align="center">
   <a href="https://pypi.org/project/asqav-mcp/"><img src="https://img.shields.io/pypi/v/asqav-mcp?style=flat-square&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/asqav-mcp/"><img src="https://img.shields.io/pypi/dm/asqav-mcp?style=flat-square&logo=pypi&logoColor=white" alt="Downloads"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square&logo=opensourceinitiative&logoColor=white" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/pypi/pyversions/asqav-mcp?style=flat-square&logo=python&logoColor=white" alt="Python versions"></a>
   <a href="https://github.com/jagmarques/asqav-mcp"><img src="https://img.shields.io/github/stars/jagmarques/asqav-mcp?style=social" alt="GitHub stars"></a>
@@ -68,8 +69,10 @@ Your MCP client now has access to policy enforcement, audit signing, and agent m
 | Tool | What it does |
 |------|-------------|
 | `check_policy` | Check if an action is allowed by your organization's policies |
+| `preflight_check` | Combined agent status and policy check in a single call. Returns CLEARED or NOT CLEARED with reasons. |
 | `sign_action` | Create a quantum-safe signed audit record for an agent action |
 | `verify_signature` | Verify a previously created signature |
+| `verify_output` | Verify a signed output matches expected content by comparing the stored output_hash against a fresh hash |
 | `list_agents` | List all registered AI agents |
 | `get_agent` | Get details for a specific agent |
 
@@ -78,7 +81,7 @@ Your MCP client now has access to policy enforcement, audit signing, and agent m
 | Tool | What it does |
 |------|-------------|
 | `gate_action` | Pre-execution enforcement gate. Checks policy, signs the approval or denial, returns verdict. Call `complete_action` after the action to close the bilateral receipt. |
-| `complete_action` | Report the outcome of a gate-approved action. Signs the result and binds it to the original approval, creating a bilateral receipt. |
+| `complete_action` | Report the outcome of a gate-approved action. Signs the result, hashes the output, and binds it to the original approval. Returns a bilateral receipt with an `output_hash` that can be verified later via `verify_output`. |
 | `enforced_tool_call` | Strong enforcement proxy. Checks policy, rate limits, and approval requirements. If a `tool_endpoint` is configured, forwards the call and signs request + response together as a bilateral receipt. |
 | `create_tool_policy` | Create or update a local enforcement policy for a tool (risk level, rate limits, approval, blocking, tool endpoint) |
 | `list_tool_policies` | List all active tool enforcement policies |
@@ -211,8 +214,8 @@ Two ways to create them:
 ```
 1. Agent calls gate_action(action_type, agent_id, ...) -> returns gate_id + approval signature
 2. Agent performs the action
-3. Agent calls complete_action(gate_id, result) -> signs outcome, links it to approval
-4. Auditor can verify either signature and trace the full chain
+3. Agent calls complete_action(gate_id, result) -> signs outcome, hashes it, links to approval, returns output_hash
+4. Auditor can verify either signature and call verify_output(signature_id, expected_output) to confirm the result has not been modified
 ```
 
 **Via enforced_tool_call with tool_endpoint** (strong enforcement):

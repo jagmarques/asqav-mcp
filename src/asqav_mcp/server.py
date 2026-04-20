@@ -1,5 +1,6 @@
 """Asqav MCP Server - AI agent governance tools for MCP clients."""
 
+import hashlib
 import json
 import os
 import re
@@ -69,6 +70,11 @@ def _check_rate_limit(tool_name: str, max_per_minute: int) -> bool:
     return True
 
 
+def _hash_value(value: str) -> str:
+    """Hash a string value with SHA-256 for output verification."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Existing tools: policy check, signing, agent management, verification
 # ---------------------------------------------------------------------------
@@ -108,6 +114,63 @@ async def check_policy(action_type: str, agent_id: str | None = None) -> str:
         return f"ALLOWED: Action '{action_type}' passes all policies"
     except Exception as e:
         return f"Error checking policies: {e}"
+
+
+@mcp.tool()
+async def preflight_check(agent_id: str, action_type: str) -> str:
+    """Pre-flight check combining agent status and policy status into one call.
+
+    Returns a human-readable summary of whether the agent is cleared to
+    perform the given action type. Checks:
+    - Agent status (not revoked, not suspended)
+    - Policy check (action allowed by org policies)
+
+    Fail-open: if any individual check errors, the agent is not blocked.
+
+    Args:
+        agent_id: The agent ID to check
+        action_type: The action to check (e.g. "data:read", "api:call")
+    """
+    agent_active = True
+    policy_allowed = True
+    reasons: list[str] = []
+
+    # Check agent status.
+    try:
+        agent_data = await _request("GET", f"/agents/{agent_id}/status")
+        if agent_data.get("revoked", False):
+            agent_active = False
+            reasons.append("agent is revoked")
+        if agent_data.get("suspended", False):
+            agent_active = False
+            reasons.append("agent is suspended")
+    except Exception as e:
+        reasons.append(f"status check failed ({e}) - skipped")
+
+    # Check organization policies.
+    try:
+        policies = await _request("GET", "/policies")
+        for p in policies if isinstance(policies, list) else []:
+            if not p.get("is_active"):
+                continue
+            pattern = p.get("action_pattern", "")
+            if pattern == "*" or action_type.startswith(pattern.rstrip("*")):
+                if p.get("action") in ("block", "block_and_alert"):
+                    policy_allowed = False
+                    reasons.append(f"blocked by policy: {p.get('name', 'unknown')}")
+    except Exception as e:
+        reasons.append(f"policy check failed ({e}) - skipped")
+
+    cleared = agent_active and policy_allowed
+
+    if cleared and not reasons:
+        return f"CLEARED: Agent '{agent_id}' is active and action '{action_type}' is allowed by all policies."
+    elif cleared:
+        warnings = "; ".join(reasons)
+        return f"CLEARED (with warnings): Agent '{agent_id}' may proceed. Warnings: {warnings}"
+    else:
+        blockers = "; ".join(reasons)
+        return f"NOT CLEARED: Agent '{agent_id}' cannot perform '{action_type}'. Reasons: {blockers}"
 
 
 @mcp.tool()
@@ -188,6 +251,49 @@ async def verify_signature(signature_id: str) -> str:
         return f"{status}: Signature {signature_id}"
     except Exception as e:
         return f"Error verifying signature: {e}"
+
+
+@mcp.tool()
+async def verify_output(signature_id: str, expected_output: str) -> str:
+    """Verify that a signed output matches the expected content.
+
+    Checks the signature validity and compares the output hash stored in the
+    signed payload against a fresh hash of expected_output. Use this to confirm
+    that an agent's reported result has not been modified after signing.
+
+    Args:
+        signature_id: The signature ID (from complete_action or sign_action)
+        expected_output: The output string to verify against the signed hash
+    """
+    try:
+        result = await _request("GET", f"/verify/{signature_id}")
+        signature_valid = result.get("valid", False)
+
+        # Extract the output_hash from the signed payload.
+        output_matches = False
+        payload = result.get("payload", {})
+        stored_hash = ""
+        if isinstance(payload, dict):
+            stored_hash = payload.get("output_hash", "")
+        if stored_hash:
+            expected_hash = _hash_value(expected_output)
+            output_matches = stored_hash == expected_hash
+
+        verified = signature_valid and output_matches
+
+        return json.dumps({
+            "verified": verified,
+            "signature_valid": signature_valid,
+            "output_matches": output_matches,
+            "signature_id": signature_id,
+        })
+    except Exception as e:
+        return json.dumps({
+            "verified": False,
+            "signature_valid": False,
+            "output_matches": False,
+            "error": str(e),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +480,9 @@ async def complete_action(gate_id: str, result: str) -> str:
         except json.JSONDecodeError:
             parsed_result = {"raw": result}
 
+        # Hash the raw result string for output verification.
+        output_hash = _hash_value(result)
+
         receipt_payload = {
             "receipt_id": receipt_id,
             "gate_id": gate_id,
@@ -383,6 +492,7 @@ async def complete_action(gate_id: str, result: str) -> str:
             "tool_name": gate.get("tool_name"),
             "arguments": gate.get("arguments"),
             "result": parsed_result,
+            "output_hash": output_hash,
             "completed_at": time.time(),
         }
 
@@ -400,9 +510,11 @@ async def complete_action(gate_id: str, result: str) -> str:
             "gate_id": gate_id,
             "approval_signature_id": gate["approval_signature_id"],
             "receipt_signature_id": receipt_sig_id,
+            "output_hash": output_hash,
             "message": (
                 "Bilateral receipt created. Both the approval and the outcome are "
-                "signed and linked. Verify either signature to confirm the full chain."
+                "signed and linked. The output_hash can be used with verify_output "
+                "to confirm the result has not been modified."
             ),
         })
 
