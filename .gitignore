@@ -1,0 +1,7 @@
+
+# local caches + nested repos
+crewAI/
+.gstack/
+dist/
+__pycache__/
+src/asqav_mcp/__pycache__/
