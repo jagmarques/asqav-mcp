@@ -191,7 +191,7 @@ docker run -e ASQAV_API_KEY="sk_live_..." asqav-mcp
 | No record of what agents did | Every action signed with ML-DSA (FIPS 204) |
 | Any agent can do anything | Policies block dangerous actions in real-time |
 | Manual compliance reports | Automated EU AI Act and DORA reports |
-| Breaks when quantum computers arrive | Quantum-safe from day one |
+| Reasoning lost after the run | Prompt, trace, and output signed and replayable |
 
 ## Enforcement
 
